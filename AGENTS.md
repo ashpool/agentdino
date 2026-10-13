@@ -20,14 +20,14 @@ The display has three states per session: idle, working and needing input. One b
 
 | Byte | Meaning | Dino (one busy session) | Lane (2 columns wide, one per session) |
 |---|---|---|---|
-| `W` | working | walks in place, head bobs | 2x2 block bouncing vertically |
+| `W` | working | walks in place, head bobs, dots scroll along the feet row | 2x2 block bouncing vertically |
 | `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the top left corner (max 4 shown, 8 tracked) | same count, in the bottom two rows; ignored for unknown and idle sessions |
 | `D` | done: the session is idle | dances for 2 s, then stands (the idle dino) | solid lane for 2 s, then a dim dot at the bottom |
-| `E` | tool failed | lane view for 0.8 s | lane flashes fast for 0.8 s; ignored for unknown sessions |
+| `E` | tool failed | startled for 0.8 s: tall eyes, a sideways shake, a sweat drop | lane flashes fast for 0.8 s; ignored for unknown sessions |
 | `I` | input needed | same dance steps, mouth open | blinking `!`; both views also blink the board's on-board LED while any session needs input |
 | `O` | session gone | | lane freed |
 
-With no busy session the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 minutes without a busy session, and the matrix goes dark after 1 hour without any command or busy session (the next command wakes it). While the dino is showing, an idle board is distinguishable from a dead one.
+With no busy session the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s, and every 20 s (5 s into the period) does one of four things, never the same twice in a row: looks left and right, wags its tail, yawns, or strolls off the right edge and back in from the left. It falls asleep with a blinking `z` after 10 minutes without a busy session, and the matrix goes dark after 1 hour without any command or busy session (the next command wakes it). While the dino is showing, an idle board is distinguishable from a dead one.
 
 Debug stream: a host that sends a `?` line over USB serial at least every 5 s gets `rx <packet>` for every packet received, `F <8 hex rows>` when the frame changes and `L <lane> ...` once a second (`-` for a free lane, else `<key>:<mode>:<agents>:<seconds since last command>` with mode `W` working, `P` idle (waiting for the next prompt), `I` input needed). Output is skipped when no host has the port open (`availableForWrite()` always returns 0 on this core, so `Serial` is the guard), frame lines are limited to one per 100 ms, and a host that attaches gets the current frame first. Keys and packets are echoed with every non-printable byte, and spaces, replaced by `?`, because anyone on the network can send them. Other lines on the port, like the IP printed on connect, are ignored by `debug.pl`.
 

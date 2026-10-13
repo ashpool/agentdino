@@ -7,7 +7,8 @@ An Arduino UNO R4 WiFi that shows Claude Code's status on its 12x8 LED matrix, o
 - `signal/signal.ino`: firmware. Reads USB serial lines and, once WiFi is up, UDP port 4210; renders up to 6 session lanes.
 - `signal/arduino_secrets.h`: `SECRET_SSID` / `SECRET_PASS`. Gitignored. Never print, log or commit it.
 - `signal.pl`: host side. Perl because it ships with macOS and starts fast (measure with `time (printf '{"session_id":"abcd-1"}' | AGENTDINO_HOST=127.0.0.1 ./signal.pl W)`, about 30 ms including the shell; `python3` through the pyenv shim costs ~250 ms, check with `time python3 -c pass`). Reads the first chunk of the hook JSON on stdin for `session_id` and sends `<first 4 chars>:<commands>`. Exits 0 even when sending fails, so a missing board never fails a hook (only a missing argument is an error).
-- `test/signal.t`: tests for `signal.pl` against local UDP listeners. Run with `prove test/`. No board or external network needed.
+- `debug.pl`: live view of the board over USB serial: the matrix, the lane table (session key, mode, subagents, seconds since its last command) and the last packets. Run `./debug.pl` in a terminal, Ctrl-C to quit.
+- `test/signal.t`, `test/debug.t`: tests for `signal.pl` (against local UDP listeners) and the parsing and rendering in `debug.pl`. Run with `prove test/`. No board or external network needed.
 
 ## Protocol
 
@@ -15,14 +16,16 @@ Datagram (UDP) or newline-terminated line (USB serial): `<4-char session key>:<c
 
 | Byte | Meaning | Lane display (2 columns wide, one lane per session) |
 |---|---|---|
-| `W` | working | 2x2 block bouncing vertically |
-| `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the bottom two rows (max 4 shown, 8 tracked); ignored for unknown sessions |
+| `W` | working | 2x2 block bouncing vertically; when it is the only active session, the whole matrix shows the dino walking in place instead |
+| `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the bottom two rows, or in the top left corner next to the walking dino (max 4 shown, 8 tracked); ignored for unknown sessions |
 | `D` | done | solid lane for 3 s, then a 2x2 block at the bottom blinking slowly (1 s) until the next command for that session |
 | `E` | tool failed | lane flashes fast for 0.8 s, then returns to its mode; ignored for unknown sessions |
 | `I` | input needed | blinking `!` until the next command for that session; the board's on-board LED blinks too while any lane needs input |
 | `O` | session gone | lane freed |
 
 With no active lane the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 idle minutes, so an idle board is distinguishable from a dead one.
+
+Debug stream: a host that sends a `?` line over USB serial at least every 5 s gets `rx <packet>` for every packet received, `F <8 hex rows>` when the frame changes and `L <lane> ...` once a second (`-` for a free lane, else `<key>:<mode>:<agents>:<seconds since last command>` with mode `W` working, `D` done, `P` waiting, `I` input needed). Output is skipped when no host has the port open (`availableForWrite()` always returns 0 on this core, so `Serial` is the guard). Other lines on the port, like the IP printed on connect, are ignored by `debug.pl`.
 
 Rules worth knowing:
 - Lanes are allocated on first `W` / `D` / `I`. A session gets its previous lane back after it was freed (so `OW` does not make it jump), unless another session has taken that lane meanwhile. With more than 6 active sessions the least recently active lane is evicted.
@@ -81,7 +84,7 @@ arduino-cli upload -p /dev/cu.usbmodem* --fqbn arduino:renesas_uno:unor4wifi sig
 
 ## No signal? Troubleshooting
 
-`signal.pl` fails silently by design, so check these in order:
+`signal.pl` fails silently by design. For a wrong or stuck display, run `./debug.pl` first: it shows which session keys hold lanes and which packets arrive. Otherwise check these in order:
 
 1. Is the board on? It needs USB power and joins WiFi at boot; it retries forever and shows nothing until connected.
 2. Does broadcast reach it? On this macOS setup `nc -b` is not broadcast, so use Perl: `perl -MIO::Socket::INET -e 'IO::Socket::INET->new(Proto=>"udp",PeerAddr=>"255.255.255.255",PeerPort=>4210,Broadcast=>1)->send("0000:W")'`. If that fails, set `AGENTDINO_HOST` (step 3) and try unicast.

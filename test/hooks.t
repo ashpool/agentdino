@@ -21,6 +21,7 @@ my %expected = (
 
 is_deeply([ sort keys %$hooks ], [ sort keys %expected ], 'the example wires exactly the expected events');
 for my $event (sort keys %expected) {
+    is(scalar @{ $hooks->{$event} }, 1, "$event has one group");
     my ($group) = @{ $hooks->{$event} };
     my ($hook) = @{ $group->{hooks} };
     is($hook->{command}, "/path/to/agentdino/signal.pl $expected{$event}", "$event runs signal.pl $expected{$event}");

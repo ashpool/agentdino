@@ -4,6 +4,9 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   perl:
     runs-on: ubuntu-latest
@@ -16,6 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: arduino/setup-arduino-cli@v2
-      - run: arduino-cli core install arduino:renesas_uno
+        with:
+          version: 1.5.1
+      - run: arduino-cli core update-index
+      - run: arduino-cli core install arduino:renesas_uno@1.6.0
       - run: cp signal/arduino_secrets.h.example signal/arduino_secrets.h
       - run: arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi signal

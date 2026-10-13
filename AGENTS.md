@@ -23,7 +23,7 @@ The display has three states per session: idle, working and needing input. One b
 | `W` | working | walks in place, head bobs, dots scroll along the feet row | 2x2 block bouncing vertically |
 | `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the top left corner (max 4 shown, 8 tracked) | same count, in the bottom two rows; ignored for unknown and idle sessions |
 | `D` | done: the session is idle | dances for 2 s, then stands (the idle dino) | solid lane for 2 s, then a dim dot at the bottom |
-| `E` | tool failed | startled for 0.8 s: tall eyes, a sideways shake, a sweat drop | lane flashes fast for 0.8 s; ignored for unknown sessions |
+| `E` | tool failed | startled for 0.8 s: tall eyes, a sideways shake, a sweat drop | lane flashes fast for 0.8 s; ignored for unknown and idle sessions |
 | `I` | input needed | same dance steps, mouth open | blinking `!`; both views also blink the board's on-board LED while any session needs input |
 | `O` | session gone | | lane freed |
 
@@ -57,7 +57,7 @@ Hooks live in the user's global `~/.claude/settings.json`, not in this repo. All
 
 ## Discovery
 
-USB first: without `AGENTDINO_HOST`, `signal.pl` writes to the first `/dev/cu.usbmodem*` (override with `AGENTDINO_SERIAL`, required if a second USB serial device is attached), so a board plugged into the laptop needs no WiFi or address. `AGENTDINO_HOST` without `AGENTDINO_SERIAL` means UDP. If the serial write fails (port held by the IDE, board mid-upload) it falls back to UDP; with no host that is a broadcast. `signal.pl` gives up after 1.5 s so a stuck port cannot time out the hook.
+USB first: without `AGENTDINO_HOST`, `signal.pl` writes to the first `/dev/cu.usbmodem*` (macOS) or `/dev/ttyACM*` (Linux; override with `AGENTDINO_SERIAL`, required if a second USB serial device is attached), so a board plugged into the laptop needs no WiFi or address. `AGENTDINO_HOST` without `AGENTDINO_SERIAL` means UDP. If the serial write fails (port held by the IDE, board mid-upload) it falls back to UDP; with no host that is a broadcast. `signal.pl` gives up after 1.5 s so a stuck port cannot time out the hook.
 
 By default over UDP `signal.pl` broadcasts to `255.255.255.255:4210`, so no board address is needed. Set `AGENTDINO_HOST` (an IP, not a hostname: a DNS lookup would run on every hook) to unicast instead (needed if a VPN routes the broadcast to the wrong interface, or the network drops broadcasts); `AGENTDINO_PORT` overrides the port. Every board on the LAN would react to a broadcast. Hooks inherit Claude Code's environment, so set `AGENTDINO_HOST` either in the `env` block of `~/.claude/settings.json` or by exporting it in your shell profile before launching `claude`.
 

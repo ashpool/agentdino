@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # Usage: signal.pl <commands>, e.g. W, OW, D, I, S, s, O.
 # Sends "<4-char session key>:<commands>"; S and s are followed by a 4-char agent id. Without $AGENTDINO_HOST it
-# is written as a line to the board's USB serial port ($AGENTDINO_SERIAL, default the first /dev/cu.usbmodem*).
+# is written as a line to the board's USB serial port ($AGENTDINO_SERIAL, default the first /dev/cu.usbmodem* (macOS) or /dev/ttyACM* (Linux)).
 # Otherwise, or if that write fails, it is one UDP datagram to $AGENTDINO_HOST (an IP; a LAN broadcast when unset) on port
 # $AGENTDINO_PORT (default 4210). The key comes from the hook JSON on stdin; with no stdin data
 # (manual use) it is 0000, and if stdin is open but silent nothing is sent. Exits 0 even when sending fails.
@@ -66,7 +66,7 @@ sub serial_path {
     my ($env) = @_;
     return $env->{AGENTDINO_SERIAL} if $env->{AGENTDINO_SERIAL};
     return if $env->{AGENTDINO_HOST};
-    return (glob '/dev/cu.usbmodem*')[0];
+    return (glob '/dev/cu.usbmodem* /dev/ttyACM*')[0];
 }
 
 # Non-blocking so a stuck port cannot hang the hook; a short write would garble the next line, so it counts as failure.

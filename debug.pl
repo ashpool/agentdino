@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 # Usage: debug.pl   (Ctrl-C to quit)
-# Live view of the board over USB serial ($AGENTDINO_SERIAL, default the first /dev/cu.usbmodem*): the LED matrix,
+# Live view of the board over USB serial ($AGENTDINO_SERIAL, default the first /dev/cu.usbmodem* (macOS) or /dev/ttyACM* (Linux)): the LED matrix,
 # the lane table and the last packets received. The board streams only while it gets a "?" line every few seconds.
 # If the board goes away (unplug, reset, upload) it waits and reconnects.
 use strict;
@@ -94,7 +94,7 @@ sub feed {
 
 sub serial_paths {
     my ($env) = @_;
-    return $env->{AGENTDINO_SERIAL} || glob '/dev/cu.usbmodem*';
+    return $env->{AGENTDINO_SERIAL} || glob '/dev/cu.usbmodem* /dev/ttyACM*';
 }
 
 # Raw 9600 8N1 without hangup on close (that would drop DTR, which the board reads as "host left").
@@ -116,7 +116,7 @@ sub set_raw {
 # Dies with a message when there is no usable port.
 sub open_port {
     my ($env) = @_;
-    my ($path) = serial_paths($env) or die "no board found on /dev/cu.usbmodem*\n";
+    my ($path) = serial_paths($env) or die "no board found on /dev/cu.usbmodem* or /dev/ttyACM*\n";
     sysopen(my $port, $path, O_RDWR | O_NONBLOCK | O_NOCTTY) or die "cannot open $path: $!\n";
     set_raw($port) or die "$path is not a serial port\n";
     return ($port, $path);

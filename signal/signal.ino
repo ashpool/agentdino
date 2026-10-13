@@ -38,6 +38,7 @@ ArduinoLEDMatrix matrix;
 WiFiUDP udp;
 Lane lanes[LANES] = {};
 uint8_t shown[ROWS][COLS];
+unsigned long idlePeriod = ~0UL;  // the idle dino's current 20 s period; reset so it picks afresh after a busy spell
 unsigned long activityAt = 0;  // the last command received or the last time a session was busy
 bool debugAsked = false;  // a host sent "?" ...
 unsigned long debugAskedAt = 0;  // ... at this time, and wants the debug lines below
@@ -217,7 +218,7 @@ void handle(const char* key, char command, const char* agentId) {
     // A late start on an idle lane would leave a phantom agent that pins the lane in WORKING for good.
     case 'S': if (lane && lane->mode != Mode::IDLE) { addAgent(*lane, agentId); lane->lastCommand = millis(); } break;
     case 's': if (lane && lane->mode != Mode::IDLE) { removeAgent(*lane, agentId); lane->lastCommand = millis(); } break;
-    case 'E': if (lane) { lane->errorUntil = millis() + ERROR_MS; lane->lastCommand = millis(); } break;
+    case 'E': if (lane && busy(*lane, millis())) { lane->errorUntil = millis() + ERROR_MS; lane->lastCommand = millis(); } break;
     case 'O': if (lane) setMode(*lane, Mode::FREE, millis()); break;
   }
 }
@@ -364,11 +365,10 @@ void drawIdleDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long id
   unsigned long phase = now % IDLE_PERIOD_MS;
   bool acting = !asleep && phase >= IDLE_ACT_AT_MS;
   unsigned long t = acting ? phase - IDLE_ACT_AT_MS : 0;
-  static unsigned long period = ~0UL;
   static int variant = 0;
-  if (now / IDLE_PERIOD_MS != period) {  // a new period: a pseudo-random pick that differs from the last one
-    period = now / IDLE_PERIOD_MS;
-    uint32_t mix = period * 2654435761u;
+  if (now / IDLE_PERIOD_MS != idlePeriod) {  // a new period: a pseudo-random pick that differs from the last one
+    idlePeriod = now / IDLE_PERIOD_MS;
+    uint32_t mix = idlePeriod * 2654435761u;
     mix ^= mix >> 15;
     mix *= 2246822519u;
     mix ^= mix >> 13;
@@ -412,10 +412,11 @@ void drawDinoSession(uint8_t frame[ROWS][COLS], const Lane& lane, unsigned long 
   uint16_t sprite[ROWS], rows[ROWS];
   for (int r = 0; r < ROWS; r++) sprite[r] = rows[r] = DINO[r];
   if (asking) sprite[3] = rows[3] = (DINO[3] & ~DINO_HEAD) | DINO_MOUTH_OPEN;
-  walkPose(rows, sprite, (now / (lively ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1);
+  bool stepB = (now / (lively ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1;
+  walkPose(rows, sprite, stepB);
   if (lane.mode == Mode::WORKING) addGround(rows, now / WALK_STEP_MS);
   if (startled) {
-    rows[2] &= ~DINO_EYES;  // the eyes are two rows tall
+    rows[stepB ? 3 : 2] &= ~DINO_EYES;  // the eyes are two rows tall; the head is a row lower in the second step
     shiftRows(rows, (now / SHAKE_MS) % 2 == 1 ? 1 : -1);
   }
   blit(frame, rows);
@@ -453,7 +454,10 @@ void loop() {
     needsInput = needsInput || lane.mode == Mode::INPUT_NEEDED;
   }
   digitalWrite(LED_BUILTIN, needsInput && (now / BLINK_MS) % 2 == 0);  // visible even when not looking at the matrix
-  if (busyLanes > 0) activityAt = now;
+  if (busyLanes > 0) {
+    activityAt = now;
+    idlePeriod = ~0UL;
+  }
   if (busyLanes == 0) {
     if (now - activityAt <= DISPLAY_OFF_MS) drawIdleDino(frame, now, now - activityAt);  // dark after a long idle
   } else if (busyLanes == 1) {

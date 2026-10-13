@@ -28,10 +28,10 @@ stateDiagram-v2
     WORKING --> WORKING: S / s (subagent dots), W (heartbeat)
     WORKING --> INPUT_NEEDED: I (permission prompt)
     INPUT_NEEDED --> WORKING: W
-    WORKING --> DONE: D (Stop)
-    DONE --> WAITING: after 3 s (slow blink)
-    WAITING --> WORKING: W (next prompt)
-    WAITING --> FREE: O or 1 h
+    WORKING --> IDLE: D (Stop, dances for 2 s)
+    INPUT_NEEDED --> IDLE: D
+    IDLE --> WORKING: W (next prompt)
+    IDLE --> FREE: O or 1 h
     WORKING --> WORKING: E (flash)
     WORKING --> FREE: O (SessionEnd) or 10 min silent
     INPUT_NEEDED --> FREE: O or 10 min unanswered

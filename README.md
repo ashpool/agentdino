@@ -29,7 +29,10 @@ stateDiagram-v2
     WORKING --> INPUT_NEEDED: I (permission prompt)
     INPUT_NEEDED --> WORKING: W
     WORKING --> DONE: D (Stop)
-    DONE --> FREE: after 3 s
+    DONE --> WAITING: after 3 s (slow blink)
+    WAITING --> WORKING: W (next prompt)
+    WAITING --> FREE: O or 1 h
+    WORKING --> WORKING: E (flash)
     WORKING --> FREE: O (SessionEnd) or 10 min silent
     INPUT_NEEDED --> FREE: O or 10 min unanswered
 ```

@@ -17,16 +17,19 @@ Datagram (UDP) or newline-terminated line (USB serial): `<4-char session key>:<c
 |---|---|---|
 | `W` | working | 2x2 block bouncing vertically |
 | `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the bottom two rows (max 4 shown, 8 tracked); ignored for unknown sessions |
-| `D` | done | solid lane for 3 s, then the lane is freed |
-| `I` | input needed | blinking `!` until the next command for that session |
+| `D` | done | solid lane for 3 s, then a 2x2 block at the bottom blinking slowly (1 s) until the next command for that session |
+| `E` | tool failed | lane flashes fast for 0.8 s, then returns to its mode; ignored for unknown sessions |
+| `I` | input needed | blinking `!` until the next command for that session; the board's on-board LED blinks too while any lane needs input |
 | `O` | session gone | lane freed |
+
+With no active lane the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 idle minutes, so an idle board is distinguishable from a dead one.
 
 Rules worth knowing:
 - Lanes are allocated on first `W` / `D` / `I`. A session gets its previous lane back after it was freed (so `OW` does not make it jump), unless another session has taken that lane meanwhile. With more than 6 active sessions the least recently active lane is evicted.
 - Repeating the current mode is ignored, so frequent `W` does not restart the animation.
 - The firmware keeps the set of running agent ids per lane: a duplicate start, a duplicate stop, and a stop for an agent it never saw start are all ignored. This matters because `SubagentStop` fires for more agents than `SubagentStart` (observed: 8 stops for 2 starts, one agent stopping twice).
 - `D` and `O` clear the lane's agent set.
-- Watchdogs (Esc interrupts fire no hook): a `WORKING` lane with no command for 10 minutes is freed, unless it has running subagents; an `INPUT_NEEDED` lane is freed after 10 minutes. Subagent `PostToolUse` hooks also fire with the parent's `session_id` and act as heartbeats (observed in a hook log).
+- Watchdogs (Esc interrupts fire no hook): a `WORKING` lane with no command for 10 minutes is freed, unless it has running subagents; an `INPUT_NEEDED` lane is freed after 10 minutes; a finished (blinking) lane is freed after 1 hour. Subagent `PostToolUse` hooks also fire with the parent's `session_id` and act as heartbeats (observed in a hook log).
 - `OW` is the "new prompt" reset: clear the lane, then start working.
 - Session key: with no stdin data (manual use, terminal or `/dev/null`) it is `0000`. If stdin is open but silent for 1 s, `signal.pl` sends nothing rather than creating a stray `0000` lane.
 - WiFi: the firmware does not wait for it at boot (USB serial works without it), reconnects without blocking the display and reopens its UDP socket afterwards (the socket reopen is untested on real hardware).
@@ -40,6 +43,7 @@ Hooks live in the user's global `~/.claude/settings.json`, not in this repo. All
 | `UserPromptSubmit` | `signal.pl OW` |
 | `PostToolUse` | `signal.pl W` (also the heartbeat, and what clears `!` after a permission prompt is answered) |
 | `SubagentStart` / `SubagentStop` | `signal.pl S` / `signal.pl s` |
+| `PostToolUseFailure` | `signal.pl EW` (flash, then heartbeat; `PostToolUse` fires only on success) |
 | `Stop` | `signal.pl D` |
 | `Notification`, matcher `permission_prompt` | `signal.pl I` |
 | `SessionEnd` | `signal.pl O` |
@@ -52,7 +56,7 @@ By default over UDP `signal.pl` broadcasts to `255.255.255.255:4210`, so no boar
 
 ## Known limitations of the hook mapping
 
-- There is no `PreToolUse` hook wired, so after you approve a permission prompt the `!` stays until the tool finishes and `PostToolUse` fires. With parallel tool calls, one tool finishing can clear a `!` while another still waits.
+- `PreToolUse` fires before the permission prompt, and no hook fires when you approve it, so the `!` stays until the tool finishes and `PostToolUse` fires. With parallel tool calls, one tool finishing can clear a `!` while another still waits.
 - A long single tool call or thinking step over 10 minutes frees the working lane until the next tool call.
 - A straggling `PostToolUse` after `Stop` (for example from a background subagent) can recreate a working lane for up to 10 minutes.
 - Esc at a permission prompt leaves the `!` until the 10-minute watchdog.

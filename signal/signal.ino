@@ -1,26 +1,31 @@
 // UDP datagrams on port 4210 or newline-terminated USB serial lines: "<4-char session key>:<command bytes>". Each session gets a 2-column lane:
 // 'W' working (bouncing block), 'S' / 's' + 4-char agent id: subagent started / stopped (a dot each, bottom rows),
-// 'D' done (solid lane for 3 s, then freed), 'I' input needed (blinking "!"), 'O' session gone (lane freed).
+// 'D' done (solid lane for 3 s, then a slow-blinking block until the next prompt), 'I' input needed (blinking "!"),
+// 'E' tool failed (lane flashes), the on-board LED blinks while any lane needs input, 'O' session gone (lane freed). With no active lane the dino mascot idles on the matrix.
 #include <Arduino_LED_Matrix.h>
 #include <WiFiS3.h>
 #include "arduino_secrets.h"  // defines SECRET_SSID and SECRET_PASS
 
 constexpr int ROWS = 8, COLS = 12, LANE_WIDTH = 2, LANES = COLS / LANE_WIDTH, KEY_LENGTH = 4;
 constexpr int MAX_SUBAGENT_DOTS = 4, MAX_AGENTS = 8;
-constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, DONE_MS = 3000;
+constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, DONE_MS = 3000, WAITING_BLINK_MS = 1000;
+constexpr unsigned long ERROR_MS = 800, ERROR_BLINK_MS = 100;
+constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, SNORE_MS = 1000;
 constexpr unsigned long WORK_TIMEOUT_MS = 600000;   // no hook heartbeat for this long => assume interrupted
+constexpr unsigned long WAITING_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
 constexpr unsigned long INPUT_TIMEOUT_MS = 600000;  // "!" left unanswered, e.g. Esc at a permission prompt
 constexpr unsigned long WIFI_RETRY_MS = 5000, WIFI_CHECK_MS = 1000;
 constexpr unsigned int PORT = 4210;
 constexpr int PACKET_MAX = 32;
 
-enum class Mode { FREE, WORKING, DONE, INPUT_NEEDED };
+enum class Mode { FREE, WORKING, DONE, WAITING, INPUT_NEEDED };  // WAITING: finished, waiting for the next prompt
 
 struct Lane {
   char key[KEY_LENGTH];
   Mode mode;
   unsigned long modeStart;
   unsigned long lastCommand;
+  unsigned long errorUntil;  // 0 = no flash running
   char agentIds[MAX_AGENTS][KEY_LENGTH];  // running subagents; the first `agents` entries are valid
   int agents;
 };
@@ -84,7 +89,7 @@ Lane& allocateLane(const char* key) {
 }
 
 void setMode(Lane& lane, Mode mode) {
-  if (mode == Mode::DONE || mode == Mode::FREE) lane.agents = 0;
+  if (mode == Mode::DONE || mode == Mode::WAITING || mode == Mode::FREE) lane.agents = 0;
   if (mode == lane.mode) return;
   lane.mode = mode;
   lane.modeStart = millis();
@@ -126,6 +131,7 @@ void handle(const char* key, char command, const char* agentId) {
     case 'I': setMode(touch(lane, key), Mode::INPUT_NEEDED); break;
     case 'S': if (lane) { addAgent(*lane, agentId); lane->lastCommand = millis(); } break;
     case 's': if (lane) { removeAgent(*lane, agentId); lane->lastCommand = millis(); } break;
+    case 'E': if (lane) { lane->errorUntil = millis() + ERROR_MS; lane->lastCommand = millis(); } break;
     case 'O': if (lane) setMode(*lane, Mode::FREE); break;
   }
 }
@@ -167,14 +173,15 @@ void receiveSerial() {
   }
 }
 
-// Frees lanes whose DONE display is over or whose session went silent. The key is kept so the
+// Moves finished lanes on and frees lanes whose session went silent. The key is kept so the
 // session gets the same lane back.
 void expire(Lane& lane, unsigned long now) {
-  bool doneShown = lane.mode == Mode::DONE && now - lane.modeStart >= DONE_MS;
+  if (lane.mode == Mode::DONE && now - lane.modeStart >= DONE_MS) setMode(lane, Mode::WAITING);
   // Subagent tool calls send no heartbeat, so a lane with running subagents is never considered stalled.
   bool workStalled = lane.mode == Mode::WORKING && lane.agents == 0 && now - lane.lastCommand > WORK_TIMEOUT_MS;
   bool inputStale = lane.mode == Mode::INPUT_NEEDED && now - lane.lastCommand > INPUT_TIMEOUT_MS;
-  if (doneShown || workStalled || inputStale) setMode(lane, Mode::FREE);
+  bool waitingStale = lane.mode == Mode::WAITING && now - lane.lastCommand > WAITING_TIMEOUT_MS;
+  if (workStalled || inputStale || waitingStale) setMode(lane, Mode::FREE);
 }
 
 void fill(uint8_t frame[ROWS][COLS], int x, int row, int rows) {
@@ -185,6 +192,10 @@ void fill(uint8_t frame[ROWS][COLS], int x, int row, int rows) {
 void drawLane(uint8_t frame[ROWS][COLS], int index, const Lane& lane, unsigned long now) {
   int x = index * LANE_WIDTH;
   unsigned long elapsed = now - lane.modeStart;
+  if (lane.mode != Mode::FREE && (long)(lane.errorUntil - now) > 0) {  // signed: errorUntil is 0 when unset
+    if ((now / ERROR_BLINK_MS) % 2 == 0) fill(frame, x, 0, ROWS);
+    return;
+  }
   switch (lane.mode) {
     case Mode::WORKING: {
       int step = (elapsed / STEP_MS) % 8;  // block rows bounce 0,1,2,3,4,3,2,1
@@ -195,6 +206,9 @@ void drawLane(uint8_t frame[ROWS][COLS], int index, const Lane& lane, unsigned l
     }
     case Mode::DONE:
       fill(frame, x, 0, ROWS);
+      break;
+    case Mode::WAITING:
+      if ((elapsed / WAITING_BLINK_MS) % 2 == 0) fill(frame, x, 6, 2);
       break;
     case Mode::INPUT_NEEDED:
       if ((elapsed / BLINK_MS) % 2 == 0) {
@@ -207,8 +221,32 @@ void drawLane(uint8_t frame[ROWS][COLS], int index, const Lane& lane, unsigned l
   }
 }
 
+// Idle mascot, from the logo: a screen head with a face, spikes on the back. One row per entry, bit 11 is column 0.
+constexpr uint16_t DINO[ROWS] = {
+  0b000000111111,
+  0b000000101101,  // eyes
+  0b000000111111,
+  0b000000101101,  // smile corners
+  0b010101110011,  // spikes, smile
+  0b011111111000,
+  0b111111111000,
+  0b001100110000,  // legs
+};
+constexpr uint16_t SNORE[3] = {0b110000000000, 0b010000000000, 0b011000000000};  // z in the top left corner
+
+void drawDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long idleFor) {
+  bool asleep = idleFor > DINO_SLEEP_MS;
+  bool eyesShut = asleep || now % DINO_BLINK_PERIOD_MS < DINO_BLINK_MS;
+  for (int r = 0; r < ROWS; r++) {
+    uint16_t bits = (r == 1 && eyesShut) ? DINO[2] : DINO[r];
+    if (asleep && r < 3 && (now / SNORE_MS) % 2 == 0) bits |= SNORE[r];
+    for (int c = 0; c < COLS; c++) frame[r][c] = (bits >> (COLS - 1 - c)) & 1;
+  }
+}
+
 void setup() {
   matrix.begin();
+  pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(9600);
   memset(shown, 0xFF, sizeof(shown));  // differs from any frame, so the first loop renders
   WiFi.setTimeout(0);  // begin() otherwise polls for 10 s, freezing the display and overflowing the serial buffer
@@ -221,10 +259,17 @@ void loop() {
   receiveSerial();
   unsigned long now = millis();  // read after receive() so now - modeStart cannot underflow
   uint8_t frame[ROWS][COLS] = {};
+  bool idle = true, needsInput = false;
   for (int i = 0; i < LANES; i++) {
     expire(lanes[i], now);
     drawLane(frame, i, lanes[i], now);
+    idle = idle && lanes[i].mode == Mode::FREE;
+    needsInput = needsInput || lanes[i].mode == Mode::INPUT_NEEDED;
   }
+  digitalWrite(LED_BUILTIN, needsInput && (now / BLINK_MS) % 2 == 0);  // visible even when not looking at the matrix
+  static unsigned long idleSince = 0;  // the last time a lane was active
+  if (!idle) idleSince = now;
+  else drawDino(frame, now, now - idleSince);
   if (memcmp(frame, shown, sizeof(frame)) != 0) {
     matrix.loadPixels(&frame[0][0], ROWS * COLS);
     memcpy(shown, frame, sizeof(frame));

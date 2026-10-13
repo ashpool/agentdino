@@ -3,7 +3,7 @@
 // (flash), 'S' / 's' + 4-char agent id: subagent started / stopped, 'O' session gone.
 // One busy session (working, asking, dancing) gets the whole matrix as the dino; with none the dino stands idle.
 // With several busy sessions each gets a 2-column lane (bouncing block, blinking "!", dim dot when idle).
-// The on-board LED blinks while any session needs input.
+// The on-board LED blinks while any session needs input. The matrix goes dark after an hour without activity.
 #include <Arduino_LED_Matrix.h>
 #include <WiFiS3.h>
 #include "arduino_secrets.h"  // defines SECRET_SSID and SECRET_PASS
@@ -12,7 +12,7 @@ constexpr int ROWS = 8, COLS = 12, LANE_WIDTH = 2, LANES = COLS / LANE_WIDTH, KE
 constexpr int MAX_SUBAGENT_DOTS = 4, MAX_AGENTS = 8;
 constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, HOP_MS = 2000;
 constexpr unsigned long ERROR_MS = 800, ERROR_BLINK_MS = 100;
-constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
+constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, DISPLAY_OFF_MS = 3600000, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
 constexpr unsigned long WORK_TIMEOUT_MS = 600000;   // no hook heartbeat for this long => assume interrupted
 constexpr unsigned long IDLE_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
 constexpr unsigned long INPUT_TIMEOUT_MS = 600000;  // "!" left unanswered, e.g. Esc at a permission prompt
@@ -38,6 +38,7 @@ ArduinoLEDMatrix matrix;
 WiFiUDP udp;
 Lane lanes[LANES] = {};
 uint8_t shown[ROWS][COLS];
+unsigned long activityAt = 0;  // the last command received or the last time a session was busy
 bool debugAsked = false;  // a host sent "?" ...
 unsigned long debugAskedAt = 0;  // ... at this time, and wants the debug lines below
 uint8_t debugShown[ROWS][COLS];  // last frame sent to the host
@@ -224,6 +225,7 @@ void handle(const char* key, char command, const char* agentId) {
 void dispatch(const char* packet, int length) {
   if (length <= KEY_LENGTH || packet[KEY_LENGTH] != ':') return;
   debugPacket(packet, length);
+  activityAt = millis();
   for (int i = KEY_LENGTH + 1; i < length; i++) {
     char command = packet[i];
     const char* agentId = nullptr;
@@ -384,10 +386,9 @@ void loop() {
     needsInput = needsInput || lane.mode == Mode::INPUT_NEEDED;
   }
   digitalWrite(LED_BUILTIN, needsInput && (now / BLINK_MS) % 2 == 0);  // visible even when not looking at the matrix
-  static unsigned long idleSince = 0;  // the last time a session was busy
-  if (busyLanes > 0) idleSince = now;
+  if (busyLanes > 0) activityAt = now;
   if (busyLanes == 0) {
-    drawIdleDino(frame, now, now - idleSince);
+    if (now - activityAt <= DISPLAY_OFF_MS) drawIdleDino(frame, now, now - activityAt);  // dark after a long idle
   } else if (busyLanes == 1 && !flashing(*only, now)) {
     drawDinoSession(frame, *only, now);
   } else {

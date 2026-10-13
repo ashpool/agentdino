@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  perl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: prove test/
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: arduino-cli core install arduino:renesas_uno
+      - run: cp signal/arduino_secrets.h.example signal/arduino_secrets.h
+      - run: arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi signal

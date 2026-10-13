@@ -1,25 +1,27 @@
-// UDP datagrams on port 4210 or newline-terminated USB serial lines: "<4-char session key>:<command bytes>". Each session gets a 2-column lane:
-// 'W' working (bouncing block), 'S' / 's' + 4-char agent id: subagent started / stopped (a dot each, bottom rows),
-// 'D' done (solid lane for 3 s, then a slow-blinking block until the next prompt), 'I' input needed (blinking "!"),
-// 'E' tool failed (lane flashes), the on-board LED blinks while any lane needs input, a single working or asking session shows the dino, 'O' session gone (lane freed). With no active lane the dino mascot idles on the matrix.
+// UDP datagrams on port 4210 or newline-terminated USB serial lines: "<4-char session key>:<command bytes>".
+// 'W' working, 'I' input needed, 'D' done (the session is idle; the dino dances for a moment), 'E' tool failed
+// (flash), 'S' / 's' + 4-char agent id: subagent started / stopped, 'O' session gone.
+// One busy session (working, asking, dancing) gets the whole matrix as the dino; with none the dino stands idle.
+// With several busy sessions each gets a 2-column lane (bouncing block, blinking "!", dim dot when idle).
+// The on-board LED blinks while any session needs input.
 #include <Arduino_LED_Matrix.h>
 #include <WiFiS3.h>
 #include "arduino_secrets.h"  // defines SECRET_SSID and SECRET_PASS
 
 constexpr int ROWS = 8, COLS = 12, LANE_WIDTH = 2, LANES = COLS / LANE_WIDTH, KEY_LENGTH = 4;
 constexpr int MAX_SUBAGENT_DOTS = 4, MAX_AGENTS = 8;
-constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, DONE_MS = 3000, WAITING_BLINK_MS = 1000;
+constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, HOP_MS = 2000;
 constexpr unsigned long ERROR_MS = 800, ERROR_BLINK_MS = 100;
 constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
 constexpr unsigned long WORK_TIMEOUT_MS = 600000;   // no hook heartbeat for this long => assume interrupted
-constexpr unsigned long WAITING_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
+constexpr unsigned long IDLE_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
 constexpr unsigned long INPUT_TIMEOUT_MS = 600000;  // "!" left unanswered, e.g. Esc at a permission prompt
 constexpr unsigned long WIFI_RETRY_MS = 5000, WIFI_CHECK_MS = 1000;
-constexpr unsigned long DEBUG_LEASE_MS = 5000, DEBUG_LANES_MS = 1000;
+constexpr unsigned long DEBUG_LEASE_MS = 5000, DEBUG_LANES_MS = 1000, DEBUG_FRAME_MS = 100;
 constexpr unsigned int PORT = 4210;
 constexpr int PACKET_MAX = 32;
 
-enum class Mode { FREE, WORKING, DONE, WAITING, INPUT_NEEDED };  // WAITING: finished, waiting for the next prompt
+enum class Mode { FREE, WORKING, IDLE, INPUT_NEEDED };  // IDLE: finished, waiting for the next prompt
 
 struct Lane {
   char key[KEY_LENGTH];
@@ -27,6 +29,7 @@ struct Lane {
   unsigned long modeStart;
   unsigned long lastCommand;
   unsigned long errorUntil;  // 0 = no flash running
+  unsigned long hopUntil;    // 0 = no dance running
   char agentIds[MAX_AGENTS][KEY_LENGTH];  // running subagents; the first `agents` entries are valid
   int agents;
 };
@@ -35,16 +38,29 @@ ArduinoLEDMatrix matrix;
 WiFiUDP udp;
 Lane lanes[LANES] = {};
 uint8_t shown[ROWS][COLS];
-unsigned long debugUntil = 0;  // a host sent "?" recently and wants the debug lines below
+bool debugAsked = false;  // a host sent "?" ...
+unsigned long debugAskedAt = 0;  // ... at this time, and wants the debug lines below
+uint8_t debugShown[ROWS][COLS];  // last frame sent to the host
+
+bool leaseActive() { return debugAsked && millis() - debugAskedAt < DEBUG_LEASE_MS; }
 
 // Serial is true only while a host has the port open; availableForWrite() is always 0 on this core.
-bool debugging() { return (long)(debugUntil - millis()) > 0 && Serial; }
+bool debugging() { return leaseActive() && Serial; }
+
+// A new host starts with the current frame, even if it has not changed for a while.
+void debugAsk() {
+  if (!leaseActive()) memset(debugShown, 0xFF, sizeof(debugShown));
+  debugAsked = true;
+  debugAskedAt = millis();
+}
+
+// Packets come from anyone on the network: keep the debug lines one line of printable characters.
+char printable(char c) { return c > ' ' && c <= '~' ? c : '?'; }
 
 char modeCode(Mode mode) {
   switch (mode) {
     case Mode::WORKING: return 'W';
-    case Mode::DONE: return 'D';
-    case Mode::WAITING: return 'P';
+    case Mode::IDLE: return 'P';
     case Mode::INPUT_NEEDED: return 'I';
     default: return '-';
   }
@@ -54,13 +70,17 @@ char modeCode(Mode mode) {
 void debugPacket(const char* packet, int length) {
   if (!debugging()) return;
   Serial.print("rx ");
-  Serial.write(packet, length);
+  for (int i = 0; i < length; i++) Serial.print(printable(packet[i]));
   Serial.println();
 }
 
-// "F <8 rows as 3 hex digits>": the frame on the matrix, bit 11 is column 0.
-void debugFrame(const uint8_t frame[ROWS][COLS]) {
-  if (!debugging()) return;
+// "F <8 rows as 3 hex digits>": the frame on the matrix, bit 11 is column 0. At most one per DEBUG_FRAME_MS; a change
+// that has to wait is sent on a later pass, because debugShown only follows what was sent.
+void debugFrame(const uint8_t frame[ROWS][COLS], unsigned long now) {
+  static unsigned long last = 0;
+  if (!debugging() || memcmp(frame, debugShown, sizeof(debugShown)) == 0 || now - last < DEBUG_FRAME_MS) return;
+  last = now;
+  memcpy(debugShown, frame, sizeof(debugShown));
   char line[1 + ROWS * 4 + 1] = "F";
   for (int r = 0; r < ROWS; r++) {
     unsigned bits = 0;
@@ -79,7 +99,7 @@ void debugLanes(unsigned long now) {
   for (const Lane& lane : lanes) {
     Serial.print(' ');
     if (lane.mode == Mode::FREE) { Serial.print('-'); continue; }
-    Serial.write(lane.key, KEY_LENGTH);
+    for (char c : lane.key) Serial.print(printable(c));
     Serial.print(':');
     Serial.print(modeCode(lane.mode));
     Serial.print(':');
@@ -88,6 +108,14 @@ void debugLanes(unsigned long now) {
     Serial.print((now - lane.lastCommand) / 1000);
   }
   Serial.println();
+}
+
+// errorUntil and hopUntil are 0 when not running; a plain signed compare against 0 would break after 24.8 days of uptime.
+bool timerRunning(unsigned long until, unsigned long now) { return until != 0 && (long)(until - now) > 0; }
+bool flashing(const Lane& lane, unsigned long now) { return timerRunning(lane.errorUntil, now); }
+bool dancing(const Lane& lane, unsigned long now) { return lane.mode == Mode::IDLE && timerRunning(lane.hopUntil, now); }
+bool busy(const Lane& lane, unsigned long now) {
+  return lane.mode == Mode::WORKING || lane.mode == Mode::INPUT_NEEDED || dancing(lane, now);
 }
 
 // Connects (and reconnects) without blocking, so USB serial works with no WiFi. Checked once per WIFI_CHECK_MS;
@@ -143,11 +171,12 @@ Lane& allocateLane(const char* key) {
   return *target;
 }
 
-void setMode(Lane& lane, Mode mode) {
-  if (mode == Mode::DONE || mode == Mode::WAITING || mode == Mode::FREE) lane.agents = 0;
+// `now` must not be later than the loop's `now`, or elapsed times underflow.
+void setMode(Lane& lane, Mode mode, unsigned long now) {
+  if (mode == Mode::IDLE || mode == Mode::FREE) lane.agents = 0;
   if (mode == lane.mode) return;
   lane.mode = mode;
-  lane.modeStart = millis();
+  lane.modeStart = now;
 }
 
 int findAgent(const Lane& lane, const char* id) {
@@ -181,13 +210,14 @@ Lane& touch(Lane* existing, const char* key) {
 void handle(const char* key, char command, const char* agentId) {
   Lane* lane = findLane(key);
   switch (command) {
-    case 'W': setMode(touch(lane, key), Mode::WORKING); break;
-    case 'D': setMode(touch(lane, key), Mode::DONE); break;
-    case 'I': setMode(touch(lane, key), Mode::INPUT_NEEDED); break;
-    case 'S': if (lane) { addAgent(*lane, agentId); lane->lastCommand = millis(); } break;
-    case 's': if (lane) { removeAgent(*lane, agentId); lane->lastCommand = millis(); } break;
+    case 'W': setMode(touch(lane, key), Mode::WORKING, millis()); break;
+    case 'D': { Lane& l = touch(lane, key); setMode(l, Mode::IDLE, millis()); l.hopUntil = millis() + HOP_MS; break; }
+    case 'I': setMode(touch(lane, key), Mode::INPUT_NEEDED, millis()); break;
+    // A late start on an idle lane would leave a phantom agent that pins the lane in WORKING for good.
+    case 'S': if (lane && lane->mode != Mode::IDLE) { addAgent(*lane, agentId); lane->lastCommand = millis(); } break;
+    case 's': if (lane && lane->mode != Mode::IDLE) { removeAgent(*lane, agentId); lane->lastCommand = millis(); } break;
     case 'E': if (lane) { lane->errorUntil = millis() + ERROR_MS; lane->lastCommand = millis(); } break;
-    case 'O': if (lane) setMode(*lane, Mode::FREE); break;
+    case 'O': if (lane) setMode(*lane, Mode::FREE, millis()); break;
   }
 }
 
@@ -219,7 +249,7 @@ void receiveSerial() {
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n') {
-      if (length == 1 && line[0] == '?') debugUntil = millis() + DEBUG_LEASE_MS;
+      if (length == 1 && line[0] == '?') debugAsk();
       else if (!tooLong) dispatch(line, length);
       length = 0;
       tooLong = false;
@@ -230,15 +260,15 @@ void receiveSerial() {
   }
 }
 
-// Moves finished lanes on and frees lanes whose session went silent. The key is kept so the
-// session gets the same lane back.
+// Frees lanes whose session went silent. The key is kept so the session gets the same lane back.
 void expire(Lane& lane, unsigned long now) {
-  if (lane.mode == Mode::DONE && now - lane.modeStart >= DONE_MS) setMode(lane, Mode::WAITING);
+  if (lane.errorUntil != 0 && !flashing(lane, now)) lane.errorUntil = 0;
+  if (lane.hopUntil != 0 && !timerRunning(lane.hopUntil, now)) lane.hopUntil = 0;
   // Subagent tool calls send no heartbeat, so a lane with running subagents is never considered stalled.
   bool workStalled = lane.mode == Mode::WORKING && lane.agents == 0 && now - lane.lastCommand > WORK_TIMEOUT_MS;
   bool inputStale = lane.mode == Mode::INPUT_NEEDED && now - lane.lastCommand > INPUT_TIMEOUT_MS;
-  bool waitingStale = lane.mode == Mode::WAITING && now - lane.lastCommand > WAITING_TIMEOUT_MS;
-  if (workStalled || inputStale || waitingStale) setMode(lane, Mode::FREE);
+  bool idleStale = lane.mode == Mode::IDLE && now - lane.lastCommand > IDLE_TIMEOUT_MS;
+  if (workStalled || inputStale || idleStale) setMode(lane, Mode::FREE, now);
 }
 
 void fill(uint8_t frame[ROWS][COLS], int x, int row, int rows) {
@@ -249,7 +279,7 @@ void fill(uint8_t frame[ROWS][COLS], int x, int row, int rows) {
 void drawLane(uint8_t frame[ROWS][COLS], int index, const Lane& lane, unsigned long now) {
   int x = index * LANE_WIDTH;
   unsigned long elapsed = now - lane.modeStart;
-  if (lane.mode != Mode::FREE && (long)(lane.errorUntil - now) > 0) {  // signed: errorUntil is 0 when unset
+  if (lane.mode != Mode::FREE && flashing(lane, now)) {
     if ((now / ERROR_BLINK_MS) % 2 == 0) fill(frame, x, 0, ROWS);
     return;
   }
@@ -261,11 +291,9 @@ void drawLane(uint8_t frame[ROWS][COLS], int index, const Lane& lane, unsigned l
         frame[6 + dot / LANE_WIDTH][x + dot % LANE_WIDTH] = 1;
       break;
     }
-    case Mode::DONE:
-      fill(frame, x, 0, ROWS);
-      break;
-    case Mode::WAITING:
-      if ((elapsed / WAITING_BLINK_MS) % 2 == 0) fill(frame, x, 6, 2);
+    case Mode::IDLE:
+      if (dancing(lane, now)) fill(frame, x, 0, ROWS);
+      else fill(frame, x, ROWS - 1, 1);
       break;
     case Mode::INPUT_NEEDED:
       if ((elapsed / BLINK_MS) % 2 == 0) {
@@ -310,15 +338,15 @@ void drawIdleDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long id
   blit(frame, rows);
 }
 
-// A single active session gets the whole matrix. Working: the dino walks in place (legs and tail swap, head bobs) and
-// its running subagents show as dots in the free top left corner. Input needed: the same, twice as fast, mouth open,
-// with a blinking "!" instead of the dots.
+// The one busy session gets the whole matrix. Working: the dino walks in place (legs and tail swap, head bobs) and its
+// running subagents show as dots in the free top left corner. Input needed: the same, twice as fast, mouth open.
+// Just finished: the same fast steps with the normal smile, a short dance.
 void drawDinoSession(uint8_t frame[ROWS][COLS], const Lane& lane, unsigned long now) {
-  bool asking = lane.mode == Mode::INPUT_NEEDED;
+  bool asking = lane.mode == Mode::INPUT_NEEDED, lively = asking || lane.mode == Mode::IDLE;
   uint16_t sprite[ROWS], rows[ROWS];
   for (int r = 0; r < ROWS; r++) sprite[r] = rows[r] = DINO[r];
   if (asking) sprite[3] = rows[3] = (DINO[3] & ~DINO_HEAD) | DINO_MOUTH_OPEN;
-  if ((now / (asking ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1) {
+  if ((now / (lively ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1) {
     for (int r = 0; r < 5; r++) rows[r] &= ~DINO_HEAD;  // head one row down; the body keeps its rows
     for (int r = 1; r <= 5; r++) rows[r] |= sprite[r - 1] & DINO_HEAD;
     rows[5] |= DINO_TAIL;  // tail up
@@ -326,13 +354,7 @@ void drawDinoSession(uint8_t frame[ROWS][COLS], const Lane& lane, unsigned long 
     rows[7] = 0b011000011000;  // legs apart
   }
   blit(frame, rows);
-  if (asking) {
-    if ((now - lane.modeStart) / BLINK_MS % 2 == 0) {
-      fill(frame, 1, 0, 2);
-      fill(frame, 1, 3, 1);
-    }
-    return;
-  }
+  if (lane.mode != Mode::WORKING) return;
   for (int dot = 0; dot < lane.agents && dot < MAX_SUBAGENT_DOTS; dot++)
     frame[1 + 2 * (dot / 2)][1 + 2 * (dot % 2)] = 1;
 }
@@ -342,6 +364,7 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(9600);
   memset(shown, 0xFF, sizeof(shown));  // differs from any frame, so the first loop renders
+  memset(debugShown, 0xFF, sizeof(debugShown));
   WiFi.setTimeout(0);  // begin() otherwise polls for 10 s, freezing the display and overflowing the serial buffer
   WiFi.begin(SECRET_SSID, SECRET_PASS);
 }
@@ -352,20 +375,20 @@ void loop() {
   receiveSerial();
   unsigned long now = millis();  // read after receive() so now - modeStart cannot underflow
   uint8_t frame[ROWS][COLS] = {};
-  int active = 0;
+  int busyLanes = 0;
   const Lane* only = nullptr;
   bool needsInput = false;
   for (Lane& lane : lanes) {
     expire(lane, now);
-    if (lane.mode != Mode::FREE) { active++; only = &lane; }
+    if (busy(lane, now)) { busyLanes++; only = &lane; }
     needsInput = needsInput || lane.mode == Mode::INPUT_NEEDED;
   }
   digitalWrite(LED_BUILTIN, needsInput && (now / BLINK_MS) % 2 == 0);  // visible even when not looking at the matrix
-  static unsigned long idleSince = 0;  // the last time a lane was active
-  if (active > 0) idleSince = now;
-  if (active == 0) {
+  static unsigned long idleSince = 0;  // the last time a session was busy
+  if (busyLanes > 0) idleSince = now;
+  if (busyLanes == 0) {
     drawIdleDino(frame, now, now - idleSince);
-  } else if (active == 1 && ((only->mode == Mode::WORKING && (long)(only->errorUntil - now) <= 0) || only->mode == Mode::INPUT_NEEDED)) {
+  } else if (busyLanes == 1 && !flashing(*only, now)) {
     drawDinoSession(frame, *only, now);
   } else {
     for (int i = 0; i < LANES; i++) drawLane(frame, i, lanes[i], now);
@@ -373,7 +396,7 @@ void loop() {
   if (memcmp(frame, shown, sizeof(frame)) != 0) {
     matrix.loadPixels(&frame[0][0], ROWS * COLS);
     memcpy(shown, frame, sizeof(frame));
-    debugFrame(frame);
   }
+  debugFrame(frame, now);
   debugLanes(now);
 }

@@ -14,25 +14,27 @@ An Arduino UNO R4 WiFi that shows Claude Code's status on its 12x8 LED matrix, o
 
 Datagram (UDP) or newline-terminated line (USB serial): `<4-char session key>:<command bytes>`, e.g. `ab12:OW` or `ab12:S5eb7`. Commands are handled in order; `S` and `s` are followed by a 4-char agent id (the last 4 chars of the hook's `agent_id`, `0000` if absent). Anything not matching this shape is ignored.
 
-| Byte | Meaning | Lane display (2 columns wide, one lane per session) |
-|---|---|---|
-| `W` | working | 2x2 block bouncing vertically; when it is the only active session, the whole matrix shows the dino walking in place instead |
-| `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the bottom two rows, or in the top left corner next to the walking dino (max 4 shown, 8 tracked); ignored for unknown sessions |
-| `D` | done | solid lane for 3 s, then a 2x2 block at the bottom blinking slowly (1 s) until the next command for that session |
-| `E` | tool failed | lane flashes fast for 0.8 s, then returns to its mode; ignored for unknown sessions |
-| `I` | input needed | blinking `!` until the next command for that session; the board's on-board LED blinks too while any lane needs input |
-| `O` | session gone | lane freed |
+The display has three states per session: idle, working and needing input. One busy session (working, needing input, or just finished) gets the whole matrix as the dino; with none the dino stands idle. With two or more busy sessions each gets a 2-column lane, and idle sessions are ignored in the dino view.
 
-With no active lane the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 idle minutes, so an idle board is distinguishable from a dead one.
+| Byte | Meaning | Dino (one busy session) | Lane (2 columns wide, one per session) |
+|---|---|---|---|
+| `W` | working | walks in place, head bobs | 2x2 block bouncing vertically |
+| `S<id>` / `s<id>` | subagent started / stopped | one dot per running subagent in the top left corner (max 4 shown, 8 tracked) | same count, in the bottom two rows; ignored for unknown and idle sessions |
+| `D` | done: the session is idle | dances for 2 s, then stands (the idle dino) | solid lane for 2 s, then a dim dot at the bottom |
+| `E` | tool failed | lane view for 0.8 s | lane flashes fast for 0.8 s; ignored for unknown sessions |
+| `I` | input needed | same dance steps, mouth open | blinking `!`; both views also blink the board's on-board LED while any session needs input |
+| `O` | session gone | | lane freed |
 
-Debug stream: a host that sends a `?` line over USB serial at least every 5 s gets `rx <packet>` for every packet received, `F <8 hex rows>` when the frame changes and `L <lane> ...` once a second (`-` for a free lane, else `<key>:<mode>:<agents>:<seconds since last command>` with mode `W` working, `D` done, `P` waiting, `I` input needed). Output is skipped when no host has the port open (`availableForWrite()` always returns 0 on this core, so `Serial` is the guard). Other lines on the port, like the IP printed on connect, are ignored by `debug.pl`.
+With no busy session the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 minutes without a busy session, so an idle board is distinguishable from a dead one.
+
+Debug stream: a host that sends a `?` line over USB serial at least every 5 s gets `rx <packet>` for every packet received, `F <8 hex rows>` when the frame changes and `L <lane> ...` once a second (`-` for a free lane, else `<key>:<mode>:<agents>:<seconds since last command>` with mode `W` working, `P` idle (waiting for the next prompt), `I` input needed). Output is skipped when no host has the port open (`availableForWrite()` always returns 0 on this core, so `Serial` is the guard), frame lines are limited to one per 100 ms, and a host that attaches gets the current frame first. Keys and packets are echoed with every non-printable byte, and spaces, replaced by `?`, because anyone on the network can send them. Other lines on the port, like the IP printed on connect, are ignored by `debug.pl`.
 
 Rules worth knowing:
 - Lanes are allocated on first `W` / `D` / `I`. A session gets its previous lane back after it was freed (so `OW` does not make it jump), unless another session has taken that lane meanwhile. With more than 6 active sessions the least recently active lane is evicted.
 - Repeating the current mode is ignored, so frequent `W` does not restart the animation.
 - The firmware keeps the set of running agent ids per lane: a duplicate start, a duplicate stop, and a stop for an agent it never saw start are all ignored. This matters because `SubagentStop` fires for more agents than `SubagentStart` (observed: 8 stops for 2 starts, one agent stopping twice).
-- `D` and `O` clear the lane's agent set.
-- Watchdogs (Esc interrupts fire no hook): a `WORKING` lane with no command for 10 minutes is freed, unless it has running subagents; an `INPUT_NEEDED` lane is freed after 10 minutes; a finished (blinking) lane is freed after 1 hour. Subagent `PostToolUse` hooks also fire with the parent's `session_id` and act as heartbeats (observed in a hook log).
+- `D` and `O` clear the lane's agent set. An idle lane is freed after 1 hour without a command.
+- Watchdogs (Esc interrupts fire no hook): a `WORKING` lane with no command for 10 minutes is freed, unless it has running subagents; an `INPUT_NEEDED` lane is freed after 10 minutes; an idle (finished) lane is freed after 1 hour. Subagent `PostToolUse` hooks also fire with the parent's `session_id` and act as heartbeats (observed in a hook log).
 - `OW` is the "new prompt" reset: clear the lane, then start working.
 - Session key: with no stdin data (manual use, terminal or `/dev/null`) it is `0000`. If stdin is open but silent for 1 s, `signal.pl` sends nothing rather than creating a stray `0000` lane.
 - WiFi: the firmware does not wait for it at boot (USB serial works without it), reconnects without blocking the display and reopens its UDP socket afterwards (the socket reopen is untested on real hardware).
@@ -106,6 +108,9 @@ arduino-cli upload -p /dev/cu.usbmodem* --fqbn arduino:renesas_uno:unor4wifi sig
 
 ## Gotchas
 
+- Close `./debug.pl` before flashing. It holds the port, the upload then fails, and the failed attempt can leave the board in its bootloader (dark matrix, no serial). A normal upload recovers it.
+- `S` / `s` are ignored for idle lanes: a late subagent start would otherwise leave a phantom agent that keeps the lane in WORKING.
+- Never compare a timestamp with 0 as a signed difference (`(long)(t - millis()) > 0`): it flips after 24.8 days of uptime. `errorUntil` uses an explicit `!= 0` test.
 - Flashing is the only thing that needs the USB cable. If an upload hangs, something else is holding the port (Arduino IDE serial monitor, a stuck `arduino-cli`).
 - macOS: there is no `timeout` command, `sed -i` needs `sed -i ''`, and a BSD `sed` replacement containing `&` needs escaping. Prefer a Python or Edit-based change for file edits.
 - macOS does not loop broadcasts back to local sockets, so broadcast delivery cannot be tested on the laptop itself; `test/signal.t` checks the target address and `SO_BROADCAST` instead.

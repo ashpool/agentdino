@@ -46,7 +46,7 @@ Hooks live in the user's global `~/.claude/settings.json`, not in this repo. All
 
 ## Discovery
 
-USB first: without `AGENTDINO_HOST`, `signal.pl` writes to the first `/dev/cu.usbmodem*` (override with `AGENTDINO_SERIAL`), so a board plugged into the laptop needs no WiFi or address. With `AGENTDINO_HOST` set it always uses UDP. With neither a serial port nor a host it broadcasts.
+USB first: without `AGENTDINO_HOST`, `signal.pl` writes to the first `/dev/cu.usbmodem*` (override with `AGENTDINO_SERIAL`, required if a second USB serial device is attached), so a board plugged into the laptop needs no WiFi or address. `AGENTDINO_HOST` without `AGENTDINO_SERIAL` means UDP. If the serial write fails (port held by the IDE, board mid-upload) it falls back to UDP; with no host that is a broadcast. `signal.pl` gives up after 1.5 s so a stuck port cannot time out the hook.
 
 By default over UDP `signal.pl` broadcasts to `255.255.255.255:4210`, so no board address is needed. Set `AGENTDINO_HOST` (an IP, not a hostname: a DNS lookup would run on every hook) to unicast instead (needed if a VPN routes the broadcast to the wrong interface, or the network drops broadcasts); `AGENTDINO_PORT` overrides the port. Every board on the LAN would react to a broadcast. Hooks inherit Claude Code's environment, so set `AGENTDINO_HOST` either in the `env` block of `~/.claude/settings.json` or by exporting it in your shell profile before launching `claude`.
 

@@ -1,9 +1,11 @@
 # Tests signal.pl against local UDP listeners; no board or external network involved.
 use strict;
 use warnings;
+use File::Temp qw(tempdir);
 use FindBin qw($Bin);
 use IO::Select;
 use IO::Socket::INET;
+use POSIX qw(mkfifo);
 use Test::More;
 use Time::HiRes qw(time);
 
@@ -56,18 +58,25 @@ is(main::with_agent('S', ''), 'S0000', 'S without agent_id uses the fallback key
 is(main::with_agent('OW', '{"agent_id":"a84cd8914fcfd5eb7"}'), 'OW', 'other commands are left alone');
 
 # serial_path / send_serial
-is(main::serial_path({ AGENTDINO_HOST => '127.0.0.1', AGENTDINO_SERIAL => '/dev/null' }), undef, 'AGENTDINO_HOST selects UDP over serial');
+is(main::serial_path({ AGENTDINO_HOST => '127.0.0.1' }), undef, 'AGENTDINO_HOST selects UDP over the serial glob');
+is(main::serial_path({ AGENTDINO_HOST => '127.0.0.1', AGENTDINO_SERIAL => '/dev/x' }), '/dev/x', 'AGENTDINO_SERIAL wins over AGENTDINO_HOST');
 is(main::serial_path({ AGENTDINO_SERIAL => '/dev/x' }), '/dev/x', 'AGENTDINO_SERIAL overrides the device path');
 {
-    my $file = "$Bin/serial.tmp";
-    unlink $file;
+    my $dir = tempdir(CLEANUP => 1);
+    my $file = "$dir/port";
     open(my $touch, '>', $file) or die "create: $!";
     close $touch;
     ok(main::send_commands('OW', $hook_json, { AGENTDINO_SERIAL => $file }), 'serial send succeeds');
     open(my $in, '<', $file) or die "read: $!";
     is(do { local $/; <$in> }, "abcd:OW\n", 'serial gets "<key>:<commands>" as a line');
-    unlink $file;
-    ok(!main::send_commands('W', $hook_json, { AGENTDINO_SERIAL => "$Bin/missing/port" }), 'missing serial port does not die');
+
+    my $fallback = listener('127.0.0.1');
+    my $env = { AGENTDINO_SERIAL => "$dir/missing", AGENTDINO_HOST => '127.0.0.1', AGENTDINO_PORT => $fallback->sockport };
+    ok(main::send_commands('W', $hook_json, $env), 'a missing serial port falls back to UDP');
+    is(received($fallback), 'abcd:W', 'the fallback datagram carries the message');
+
+    mkfifo("$dir/fifo", 0600) or die "mkfifo: $!";
+    ok(!main::send_serial("$dir/fifo", 'abcd:W'), 'a port nobody reads fails immediately instead of blocking');
 }
 
 # send_commands / open_socket

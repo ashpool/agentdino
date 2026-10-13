@@ -153,13 +153,16 @@ void receiveUdp() {
 void receiveSerial() {
   static char line[PACKET_MAX];
   static int length = 0;
+  static bool tooLong = false;  // a truncated line must not run its prefix
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n') {
-      dispatch(line, length);
+      if (!tooLong) dispatch(line, length);
       length = 0;
-    } else if (c != '\r' && length < PACKET_MAX) {
-      line[length++] = c;
+      tooLong = false;
+    } else if (c != '\r') {
+      if (length < PACKET_MAX) line[length++] = c;
+      else tooLong = true;
     }
   }
 }
@@ -208,6 +211,7 @@ void setup() {
   matrix.begin();
   Serial.begin(9600);
   memset(shown, 0xFF, sizeof(shown));  // differs from any frame, so the first loop renders
+  WiFi.setTimeout(0);  // begin() otherwise polls for 10 s, freezing the display and overflowing the serial buffer
   WiFi.begin(SECRET_SSID, SECRET_PASS);
 }
 

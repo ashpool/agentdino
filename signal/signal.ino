@@ -12,7 +12,7 @@ constexpr int ROWS = 8, COLS = 12, LANE_WIDTH = 2, LANES = COLS / LANE_WIDTH, KE
 constexpr int MAX_SUBAGENT_DOTS = 4, MAX_AGENTS = 8;
 constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, HOP_MS = 2000;
 constexpr unsigned long ERROR_MS = 800, ERROR_BLINK_MS = 100;
-constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, DISPLAY_OFF_MS = 3600000, IDLE_PERIOD_MS = 20000, IDLE_ACT_AT_MS = 5000, SHAKE_MS = 60, SWEAT_MS = 150, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
+constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, DISPLAY_OFF_MS = 3600000, STRAY_PIXELS = 8, IDLE_PERIOD_MS = 20000, IDLE_ACT_AT_MS = 5000, SHAKE_MS = 60, SWEAT_MS = 150, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
 constexpr unsigned long WORK_TIMEOUT_MS = 600000;   // no hook heartbeat for this long => assume interrupted
 constexpr unsigned long IDLE_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
 constexpr unsigned long INPUT_TIMEOUT_MS = 600000;  // "!" left unanswered, e.g. Esc at a permission prompt
@@ -38,7 +38,6 @@ ArduinoLEDMatrix matrix;
 WiFiUDP udp;
 Lane lanes[LANES] = {};
 uint8_t shown[ROWS][COLS];
-unsigned long idlePeriod = ~0UL;  // the idle dino's current 20 s period; reset so it picks afresh after a busy spell
 unsigned long activityAt = 0;  // the last command received or the last time a session was busy
 bool debugAsked = false;  // a host sent "?" ...
 unsigned long debugAskedAt = 0;  // ... at this time, and wants the debug lines below
@@ -347,6 +346,12 @@ void shiftRows(uint16_t rows[ROWS], int dx) {
   for (int r = 0; r < ROWS; r++) rows[r] = dx >= 0 ? rows[r] >> dx : (rows[r] << -dx) & 0xFFF;
 }
 
+int litPixels(const uint16_t rows[ROWS]) {
+  int lit = 0;
+  for (int r = 0; r < ROWS; r++) lit += __builtin_popcount(rows[r]);
+  return lit;
+}
+
 // Dots on the feet row, moving left a step at a time: the dino is going somewhere. Pixels next to a foot stay dark so
 // the dots do not merge with the legs.
 void addGround(uint16_t rows[ROWS], unsigned long step) {
@@ -362,13 +367,15 @@ void addGround(uint16_t rows[ROWS], unsigned long step) {
 // edge and back in from the left. Asleep (after DINO_SLEEP_MS) it only breathes out a z.
 void drawIdleDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long idleFor) {
   bool asleep = idleFor > DINO_SLEEP_MS;
-  unsigned long phase = now % IDLE_PERIOD_MS;
+  unsigned long phase = idleFor % IDLE_PERIOD_MS;  // counted from when it became idle: it always starts out standing
   bool acting = !asleep && phase >= IDLE_ACT_AT_MS;
   unsigned long t = acting ? phase - IDLE_ACT_AT_MS : 0;
+  static unsigned long anchor = 0, period = ~0UL;
   static int variant = 0;
-  if (now / IDLE_PERIOD_MS != idlePeriod) {  // a new period: a pseudo-random pick that differs from the last one
-    idlePeriod = now / IDLE_PERIOD_MS;
-    uint32_t mix = idlePeriod * 2654435761u;
+  if (anchor != activityAt || idleFor / IDLE_PERIOD_MS != period) {  // a new period: a pseudo-random pick that differs from the last one
+    anchor = activityAt;
+    period = idleFor / IDLE_PERIOD_MS;
+    uint32_t mix = (activityAt + period) * 2654435761u;
     mix ^= mix >> 15;
     mix *= 2246822519u;
     mix ^= mix >> 13;
@@ -398,6 +405,8 @@ void drawIdleDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long id
     int step = (int)(t / WALK_STEP_MS);
     walkPose(rows, DINO, step % 2 == 1);
     shiftRows(rows, step < COLS ? step : step - 2 * COLS);
+    if (litPixels(rows) < STRAY_PIXELS)  // a lone bit of tail or head at the edge looks like a glitch: show nothing
+      for (int r = 0; r < ROWS; r++) rows[r] = 0;
   }
   blit(frame, rows);
 }
@@ -454,10 +463,7 @@ void loop() {
     needsInput = needsInput || lane.mode == Mode::INPUT_NEEDED;
   }
   digitalWrite(LED_BUILTIN, needsInput && (now / BLINK_MS) % 2 == 0);  // visible even when not looking at the matrix
-  if (busyLanes > 0) {
-    activityAt = now;
-    idlePeriod = ~0UL;
-  }
+  if (busyLanes > 0) activityAt = now;
   if (busyLanes == 0) {
     if (now - activityAt <= DISPLAY_OFF_MS) drawIdleDino(frame, now, now - activityAt);  // dark after a long idle
   } else if (busyLanes == 1) {

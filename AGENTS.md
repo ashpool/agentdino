@@ -8,7 +8,9 @@ An Arduino UNO R4 WiFi that shows Claude Code's status on its 12x8 LED matrix, o
 - `signal/arduino_secrets.h`: `SECRET_SSID` / `SECRET_PASS`. Gitignored. Never print, log or commit it.
 - `signal.pl`: host side. Perl because it ships with macOS and starts fast (measure with `time (printf '{"session_id":"abcd-1"}' | AGENTDINO_HOST=127.0.0.1 ./signal.pl W)`, about 30 ms including the shell; `python3` through the pyenv shim costs ~250 ms, check with `time python3 -c pass`). Reads the first chunk of the hook JSON on stdin for `session_id` and sends `<first 4 chars>:<commands>`. Exits 0 even when sending fails, so a missing board never fails a hook (only a missing argument is an error).
 - `debug.pl`: live view of the board over USB serial: the matrix, the lane table (session key, mode, subagents, seconds since its last command) and the last packets. Run `./debug.pl` in a terminal, Ctrl-C to quit.
-- `test/signal.t`, `test/debug.t`: tests for `signal.pl` (against local UDP listeners) and the parsing and rendering in `debug.pl`. Run with `prove test/`. No board or external network needed.
+- `hooks.example.json`: the hook entries to merge into `~/.claude/settings.json` (replace `/path/to/agentdino`). `signal/arduino_secrets.h.example`: template for the gitignored WiFi credentials.
+- `.github/workflows/ci.yml`: runs `prove test/` and compiles the sketch (with the example secrets header) on pull requests and pushes to master.
+- `test/signal.t`, `test/debug.t`, `test/hooks.t`: tests for `signal.pl` (against local UDP listeners), the parsing and rendering in `debug.pl`, and `hooks.example.json`. Run with `prove test/`. No board or external network needed.
 
 ## Protocol
 
@@ -25,7 +27,7 @@ The display has three states per session: idle, working and needing input. One b
 | `I` | input needed | same dance steps, mouth open | blinking `!`; both views also blink the board's on-board LED while any session needs input |
 | `O` | session gone | | lane freed |
 
-With no busy session the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 minutes without a busy session, so an idle board is distinguishable from a dead one.
+With no busy session the matrix shows the dino mascot (head with a face, back spikes): it blinks every 4 s and falls asleep with a blinking `z` after 10 minutes without a busy session, and the matrix goes dark after 1 hour without any command or busy session (the next command wakes it). While the dino is showing, an idle board is distinguishable from a dead one.
 
 Debug stream: a host that sends a `?` line over USB serial at least every 5 s gets `rx <packet>` for every packet received, `F <8 hex rows>` when the frame changes and `L <lane> ...` once a second (`-` for a free lane, else `<key>:<mode>:<agents>:<seconds since last command>` with mode `W` working, `P` idle (waiting for the next prompt), `I` input needed). Output is skipped when no host has the port open (`availableForWrite()` always returns 0 on this core, so `Serial` is the guard), frame lines are limited to one per 100 ms, and a host that attaches gets the current frame first. Keys and packets are echoed with every non-printable byte, and spaces, replaced by `?`, because anyone on the network can send them. Other lines on the port, like the IP printed on connect, are ignored by `debug.pl`.
 

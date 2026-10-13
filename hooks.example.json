@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl OW", "timeout": 2 }] }],
+    "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl W", "timeout": 2 }] }],
+    "PostToolUseFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl EW", "timeout": 2 }] }],
+    "SubagentStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl S", "timeout": 2 }] }],
+    "SubagentStop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl s", "timeout": 2 }] }],
+    "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl D", "timeout": 2 }] }],
+    "Notification": [{ "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl I", "timeout": 2 }] }],
+    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "/path/to/agentdino/signal.pl O", "timeout": 2 }] }]
+  }
+}

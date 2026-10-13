@@ -2,6 +2,8 @@
   <img src="logo.png" alt="Agentdino" width="400">
 </p>
 
+[![ci](https://github.com/ashpool/agentdino/actions/workflows/ci.yml/badge.svg)](https://github.com/ashpool/agentdino/actions/workflows/ci.yml)
+
 An Arduino UNO R4 WiFi that shows Claude Code's status on its 12x8 LED matrix, one lane per Claude session. Claude Code hooks send commands to the board over USB serial or UDP.
 
 ## How it works

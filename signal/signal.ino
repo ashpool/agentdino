@@ -12,7 +12,7 @@ constexpr int ROWS = 8, COLS = 12, LANE_WIDTH = 2, LANES = COLS / LANE_WIDTH, KE
 constexpr int MAX_SUBAGENT_DOTS = 4, MAX_AGENTS = 8;
 constexpr unsigned long STEP_MS = 120, BLINK_MS = 400, HOP_MS = 2000;
 constexpr unsigned long ERROR_MS = 800, ERROR_BLINK_MS = 100;
-constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, DISPLAY_OFF_MS = 3600000, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
+constexpr unsigned long DINO_BLINK_PERIOD_MS = 4000, DINO_BLINK_MS = 150, DINO_SLEEP_MS = 600000, DISPLAY_OFF_MS = 3600000, IDLE_PERIOD_MS = 20000, IDLE_ACT_AT_MS = 5000, SHAKE_MS = 60, SWEAT_MS = 150, SNORE_MS = 1000, WALK_STEP_MS = 250, EXCITED_STEP_MS = 120;
 constexpr unsigned long WORK_TIMEOUT_MS = 600000;   // no hook heartbeat for this long => assume interrupted
 constexpr unsigned long IDLE_TIMEOUT_MS = 3600000;  // finished lane nobody came back to, or a lost "O"
 constexpr unsigned long INPUT_TIMEOUT_MS = 600000;  // "!" left unanswered, e.g. Esc at a permission prompt
@@ -322,6 +322,8 @@ constexpr uint16_t DINO[ROWS] = {
 constexpr uint16_t DINO_HEAD = 0b000001111111;  // columns 5-11
 constexpr uint16_t DINO_TAIL = 0b100000000000;  // column 0
 constexpr uint16_t DINO_MOUTH_OPEN = 0b1110111;  // row 3 head columns: one hole instead of the smile corners
+constexpr uint16_t DINO_EYES = 0b000000100010;  // the eye holes of rows 1 and 2
+constexpr uint16_t DINO_YAWN = 0b000000011100;  // the open mouth of rows 3 and 4
 constexpr uint16_t SNORE[3] = {0b110000000000, 0b010000000000, 0b011000000000};  // z in the top left corner
 
 void blit(uint8_t frame[ROWS][COLS], const uint16_t rows[ROWS]) {
@@ -329,33 +331,98 @@ void blit(uint8_t frame[ROWS][COLS], const uint16_t rows[ROWS]) {
     for (int c = 0; c < COLS; c++) frame[r][c] = (rows[r] >> (COLS - 1 - c)) & 1;
 }
 
+// The second frame of the walk: head one row down, tail up, legs apart. `rows` starts as a copy of `sprite`.
+void walkPose(uint16_t rows[ROWS], const uint16_t sprite[ROWS], bool stepB) {
+  if (!stepB) return;
+  for (int r = 0; r < 5; r++) rows[r] &= ~DINO_HEAD;  // the body keeps its rows
+  for (int r = 1; r <= 5; r++) rows[r] |= sprite[r - 1] & DINO_HEAD;
+  rows[5] |= DINO_TAIL;
+  rows[6] &= ~DINO_TAIL;
+  rows[7] = 0b011000011000;
+}
+
+// Moves the picture right (dx > 0) or left; whatever leaves the matrix is gone.
+void shiftRows(uint16_t rows[ROWS], int dx) {
+  for (int r = 0; r < ROWS; r++) rows[r] = dx >= 0 ? rows[r] >> dx : (rows[r] << -dx) & 0xFFF;
+}
+
+// Dots on the feet row, moving left a step at a time: the dino is going somewhere. Pixels next to a foot stay dark so
+// the dots do not merge with the legs.
+void addGround(uint16_t rows[ROWS], unsigned long step) {
+  uint16_t feet = rows[ROWS - 1];
+  for (int c = 0; c < COLS; c++) {
+    uint16_t pixel = 1 << (COLS - 1 - c);
+    if ((c + step) % 3 == 0 && !(feet & ((pixel << 1) | pixel | (pixel >> 1)))) rows[ROWS - 1] |= pixel;
+  }
+}
+
+// Standing, with a blink every few seconds. Once per IDLE_PERIOD_MS, after a pause, it does one of four things, never
+// the same twice in a row: look around, wag the tail, yawn, or stroll off the right
+// edge and back in from the left. Asleep (after DINO_SLEEP_MS) it only breathes out a z.
 void drawIdleDino(uint8_t frame[ROWS][COLS], unsigned long now, unsigned long idleFor) {
   bool asleep = idleFor > DINO_SLEEP_MS;
-  bool eyesShut = asleep || now % DINO_BLINK_PERIOD_MS < DINO_BLINK_MS;
+  unsigned long phase = now % IDLE_PERIOD_MS;
+  bool acting = !asleep && phase >= IDLE_ACT_AT_MS;
+  unsigned long t = acting ? phase - IDLE_ACT_AT_MS : 0;
+  static unsigned long period = ~0UL;
+  static int variant = 0;
+  if (now / IDLE_PERIOD_MS != period) {  // a new period: a pseudo-random pick that differs from the last one
+    period = now / IDLE_PERIOD_MS;
+    uint32_t mix = period * 2654435761u;
+    mix ^= mix >> 15;
+    mix *= 2246822519u;
+    mix ^= mix >> 13;
+    int pick = (int)(mix % 4);
+    variant = pick == variant ? (pick + 1) % 4 : pick;
+  }
   uint16_t rows[ROWS];
-  for (int r = 0; r < ROWS; r++) {
-    rows[r] = (r == 1 && eyesShut) ? DINO[2] : DINO[r];
-    if (asleep && r < 3 && (now / SNORE_MS) % 2 == 0) rows[r] |= SNORE[r];
+  for (int r = 0; r < ROWS; r++) rows[r] = DINO[r];
+  if (asleep || now % DINO_BLINK_PERIOD_MS < DINO_BLINK_MS) rows[1] = DINO[2];  // eyes shut
+  if (asleep) {
+    for (int r = 0; r < 3; r++)
+      if ((now / SNORE_MS) % 2 == 0) rows[r] |= SNORE[r];
+  } else if (acting && variant == 0 && t < 2400) {  // look left, ahead, right, ahead
+    static const int look[4] = {-1, 0, 1, 0};
+    int off = look[(t / 600) % 4];
+    rows[1] = DINO_HEAD & ~((1 << (5 - off)) | (1 << (1 - off)));  // the eye holes move across the face
+  } else if (acting && variant == 1 && t < 2400) {  // wag
+    if ((t / 150) % 2 == 1) {
+      rows[5] |= DINO_TAIL;
+      rows[6] &= ~DINO_TAIL;
+    }
+  } else if (acting && variant == 2 && t < 1800) {  // yawn
+    rows[1] = DINO[2];
+    rows[3] &= ~DINO_YAWN;
+    rows[4] &= ~DINO_YAWN;
+  } else if (acting && variant == 3 && t < 6000) {  // stroll: 12 steps off the right edge, 12 in from the left
+    int step = (int)(t / WALK_STEP_MS);
+    walkPose(rows, DINO, step % 2 == 1);
+    shiftRows(rows, step < COLS ? step : step - 2 * COLS);
   }
   blit(frame, rows);
 }
 
-// The one busy session gets the whole matrix. Working: the dino walks in place (legs and tail swap, head bobs) and its
-// running subagents show as dots in the free top left corner. Input needed: the same, twice as fast, mouth open.
-// Just finished: the same fast steps with the normal smile, a short dance.
+// The one busy session gets the whole matrix. Working: the dino walks in place (legs and tail swap, head bobs, ground
+// scrolls underfoot) and its running subagents show as dots in the free top left corner. Input needed: the same, twice
+// as fast, mouth open. Just finished: the fast steps with the normal smile, a short dance. A failed tool startles it:
+// tall eyes, a shake and a falling sweat drop.
 void drawDinoSession(uint8_t frame[ROWS][COLS], const Lane& lane, unsigned long now) {
   bool asking = lane.mode == Mode::INPUT_NEEDED, lively = asking || lane.mode == Mode::IDLE;
+  bool startled = flashing(lane, now);
   uint16_t sprite[ROWS], rows[ROWS];
   for (int r = 0; r < ROWS; r++) sprite[r] = rows[r] = DINO[r];
   if (asking) sprite[3] = rows[3] = (DINO[3] & ~DINO_HEAD) | DINO_MOUTH_OPEN;
-  if ((now / (lively ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1) {
-    for (int r = 0; r < 5; r++) rows[r] &= ~DINO_HEAD;  // head one row down; the body keeps its rows
-    for (int r = 1; r <= 5; r++) rows[r] |= sprite[r - 1] & DINO_HEAD;
-    rows[5] |= DINO_TAIL;  // tail up
-    rows[6] &= ~DINO_TAIL;
-    rows[7] = 0b011000011000;  // legs apart
+  walkPose(rows, sprite, (now / (lively ? EXCITED_STEP_MS : WALK_STEP_MS)) % 2 == 1);
+  if (lane.mode == Mode::WORKING) addGround(rows, now / WALK_STEP_MS);
+  if (startled) {
+    rows[2] &= ~DINO_EYES;  // the eyes are two rows tall
+    shiftRows(rows, (now / SHAKE_MS) % 2 == 1 ? 1 : -1);
   }
   blit(frame, rows);
+  if (startled) {
+    frame[1 + (now / SWEAT_MS) % 3][3] = 1;  // a sweat drop falls beside the head
+    return;
+  }
   if (lane.mode != Mode::WORKING) return;
   for (int dot = 0; dot < lane.agents && dot < MAX_SUBAGENT_DOTS; dot++)
     frame[1 + 2 * (dot / 2)][1 + 2 * (dot % 2)] = 1;
@@ -389,7 +456,7 @@ void loop() {
   if (busyLanes > 0) activityAt = now;
   if (busyLanes == 0) {
     if (now - activityAt <= DISPLAY_OFF_MS) drawIdleDino(frame, now, now - activityAt);  // dark after a long idle
-  } else if (busyLanes == 1 && !flashing(*only, now)) {
+  } else if (busyLanes == 1) {
     drawDinoSession(frame, *only, now);
   } else {
     for (int i = 0; i < LANES; i++) drawLane(frame, i, lanes[i], now);
